@@ -10376,6 +10376,96 @@ static inline void zend_ct_eval_greater(zval *result, zend_ast_kind kind, zval *
 }
 /* }}} */
 
+static inline bool zend_try_ct_eval_comparison_chain(zval *result, zend_ast *ast) /* {{{ */
+{
+	zend_ast_list *list = zend_ast_get_list(ast);
+	zval *left;
+	uint32_t i;
+
+	ZEND_ASSERT(list->children >= 3 && (list->children & 1) == 1);
+	left = zend_ast_get_zval(list->child[0]);
+
+	for (i = 1; i < list->children; i += 2) {
+		uint32_t relation = zval_get_long(zend_ast_get_zval(list->child[i]));
+		zval *right = zend_ast_get_zval(list->child[i + 1]);
+
+		switch (relation) {
+			case ZEND_COMPARISON_CHAIN_LT:
+				if (!zend_try_ct_eval_binary_op(result, ZEND_IS_SMALLER, left, right)) {
+					return false;
+				}
+				break;
+			case ZEND_COMPARISON_CHAIN_LE:
+				if (!zend_try_ct_eval_binary_op(result, ZEND_IS_SMALLER_OR_EQUAL, left, right)) {
+					return false;
+				}
+				break;
+			case ZEND_COMPARISON_CHAIN_GT:
+				zend_ct_eval_greater(result, ZEND_AST_GREATER, left, right);
+				break;
+			case ZEND_COMPARISON_CHAIN_GE:
+				zend_ct_eval_greater(result, ZEND_AST_GREATER_EQUAL, left, right);
+				break;
+			EMPTY_SWITCH_DEFAULT_CASE();
+		}
+
+		if (!zend_is_true(result)) {
+			ZVAL_FALSE(result);
+			return true;
+		}
+
+		left = right;
+	}
+
+	ZVAL_TRUE(result);
+	return true;
+}
+/* }}} */
+
+static void zend_emit_comparison_chain_op(znode *result, uint32_t relation, znode *left_node, znode *right_node) /* {{{ */
+{
+	switch (relation) {
+		case ZEND_COMPARISON_CHAIN_LT:
+			zend_emit_op_tmp(result, ZEND_IS_SMALLER, left_node, right_node);
+			return;
+		case ZEND_COMPARISON_CHAIN_LE:
+			zend_emit_op_tmp(result, ZEND_IS_SMALLER_OR_EQUAL, left_node, right_node);
+			return;
+		case ZEND_COMPARISON_CHAIN_GT:
+			zend_emit_op_tmp(result, ZEND_IS_SMALLER, right_node, left_node);
+			return;
+		case ZEND_COMPARISON_CHAIN_GE:
+			zend_emit_op_tmp(result, ZEND_IS_SMALLER_OR_EQUAL, right_node, left_node);
+			return;
+		EMPTY_SWITCH_DEFAULT_CASE();
+	}
+}
+/* }}} */
+
+static void zend_emit_comparison_chain_op_result(znode *result, uint32_t relation, znode *left_node, znode *right_node) /* {{{ */
+{
+	zend_op *opline;
+
+	switch (relation) {
+		case ZEND_COMPARISON_CHAIN_LT:
+			opline = zend_emit_op(NULL, ZEND_IS_SMALLER, left_node, right_node);
+			break;
+		case ZEND_COMPARISON_CHAIN_LE:
+			opline = zend_emit_op(NULL, ZEND_IS_SMALLER_OR_EQUAL, left_node, right_node);
+			break;
+		case ZEND_COMPARISON_CHAIN_GT:
+			opline = zend_emit_op(NULL, ZEND_IS_SMALLER, right_node, left_node);
+			break;
+		case ZEND_COMPARISON_CHAIN_GE:
+			opline = zend_emit_op(NULL, ZEND_IS_SMALLER_OR_EQUAL, right_node, left_node);
+			break;
+		EMPTY_SWITCH_DEFAULT_CASE();
+	}
+
+	SET_NODE(opline->result, result);
+}
+/* }}} */
+
 static bool zend_try_ct_eval_array(zval *result, zend_ast *ast) /* {{{ */
 {
 	const zend_ast_list *list = zend_ast_get_list(ast);
@@ -10596,6 +10686,62 @@ static void zend_compile_greater(znode *result, zend_ast *ast) /* {{{ */
 	zend_emit_op_tmp(result,
 		ast->kind == ZEND_AST_GREATER ? ZEND_IS_SMALLER : ZEND_IS_SMALLER_OR_EQUAL,
 		&right_node, &left_node);
+}
+/* }}} */
+
+static void zend_compile_comparison_chain(znode *result, zend_ast *ast) /* {{{ */
+{
+	zend_ast_list *list = zend_ast_get_list(ast);
+	znode left_node, right_node, cmp_node;
+	uint32_t max_jumps = list->children / 2;
+	uint32_t *jmpz_opnums = safe_emalloc(max_jumps, sizeof(uint32_t), 0);
+	uint32_t num_jumps = 0;
+	uint32_t i;
+	bool result_initialized = false;
+
+	ZEND_ASSERT(list->children >= 3 && (list->children & 1) == 1);
+
+	zend_compile_expr(&left_node, list->child[0]);
+
+	for (i = 1; i < list->children; i += 2) {
+		uint32_t relation = zval_get_long(zend_ast_get_zval(list->child[i]));
+		zend_op *opline_jmpz;
+
+		zend_compile_expr(&right_node, list->child[i + 1]);
+
+		if (i + 2 >= list->children) {
+			if (!result_initialized) {
+				zend_emit_comparison_chain_op(result, relation, &left_node, &right_node);
+			} else {
+				zend_emit_comparison_chain_op_result(result, relation, &left_node, &right_node);
+			}
+			break;
+		}
+
+		zend_emit_comparison_chain_op(&cmp_node, relation, &left_node, &right_node);
+		jmpz_opnums[num_jumps] = get_next_op_number();
+		opline_jmpz = zend_emit_op(NULL, ZEND_JMPZ_EX, &cmp_node, NULL);
+
+		if (!result_initialized) {
+			if (cmp_node.op_type == IS_TMP_VAR) {
+				SET_NODE(opline_jmpz->result, &cmp_node);
+				GET_NODE(result, opline_jmpz->result);
+			} else {
+				zend_make_tmp_result(result, opline_jmpz);
+			}
+			result_initialized = true;
+		} else {
+			SET_NODE(opline_jmpz->result, result);
+		}
+
+		num_jumps++;
+		left_node = right_node;
+	}
+
+	while (num_jumps > 0) {
+		zend_update_jump_target_to_next(jmpz_opnums[--num_jumps]);
+	}
+	efree(jmpz_opnums);
 }
 /* }}} */
 
@@ -11611,6 +11757,7 @@ static void zend_compile_magic_const(znode *result, const zend_ast *ast) /* {{{ 
 static bool zend_is_allowed_in_const_expr(zend_ast_kind kind) /* {{{ */
 {
 	return kind == ZEND_AST_ZVAL || kind == ZEND_AST_BINARY_OP
+		|| kind == ZEND_AST_COMPARISON_CHAIN
 		|| kind == ZEND_AST_GREATER || kind == ZEND_AST_GREATER_EQUAL
 		|| kind == ZEND_AST_AND || kind == ZEND_AST_OR
 		|| kind == ZEND_AST_UNARY_OP
@@ -12149,6 +12296,9 @@ static void zend_compile_expr_inner(znode *result, zend_ast *ast) /* {{{ */
 		case ZEND_AST_BINARY_OP:
 			zend_compile_binary_op(result, ast);
 			return;
+		case ZEND_AST_COMPARISON_CHAIN:
+			zend_compile_comparison_chain(result, ast);
+			return;
 		case ZEND_AST_GREATER:
 		case ZEND_AST_GREATER_EQUAL:
 			zend_compile_greater(result, ast);
@@ -12426,6 +12576,23 @@ static void zend_eval_const_expr(zend_ast **ast_ptr) /* {{{ */
 				return;
 			}
 			break;
+		case ZEND_AST_COMPARISON_CHAIN:
+		{
+			zend_ast_list *list = zend_ast_get_list(ast);
+			uint32_t i;
+
+			for (i = 0; i < list->children; i += 2) {
+				zend_eval_const_expr(&list->child[i]);
+				if (list->child[i]->kind != ZEND_AST_ZVAL) {
+					return;
+				}
+			}
+
+			if (!zend_try_ct_eval_comparison_chain(&result, ast)) {
+				return;
+			}
+			break;
+		}
 		case ZEND_AST_GREATER:
 		case ZEND_AST_GREATER_EQUAL:
 			zend_eval_const_expr(&ast->child[0]);

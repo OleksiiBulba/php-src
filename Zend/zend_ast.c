@@ -716,6 +716,74 @@ static zend_result ZEND_FASTCALL zend_ast_evaluate_inner(
 				ret = EG(exception) ? FAILURE : SUCCESS;
 			}
 			break;
+		case ZEND_AST_COMPARISON_CHAIN:
+		{
+			zend_ast_list *list = zend_ast_get_list(ast);
+			uint32_t i;
+			bool chain_result = true;
+
+			ZEND_ASSERT(list->children >= 3 && (list->children & 1) == 1);
+
+			if (UNEXPECTED(zend_ast_evaluate_ex(&op1, list->child[0], scope, &short_circuited, ctx) != SUCCESS)) {
+				ret = FAILURE;
+				break;
+			}
+
+			for (i = 1; i < list->children; i += 2) {
+				uint32_t relation = zval_get_long(zend_ast_get_zval(list->child[i]));
+				binary_op_type op;
+
+				if (UNEXPECTED(zend_ast_evaluate_ex(&op2, list->child[i + 1], scope, &short_circuited, ctx) != SUCCESS)) {
+					zval_ptr_dtor_nogc(&op1);
+					ret = FAILURE;
+					break;
+				}
+
+				switch (relation) {
+					case ZEND_COMPARISON_CHAIN_LT:
+						op = is_smaller_function;
+						op(result, &op1, &op2);
+						break;
+					case ZEND_COMPARISON_CHAIN_LE:
+						op = is_smaller_or_equal_function;
+						op(result, &op1, &op2);
+						break;
+					case ZEND_COMPARISON_CHAIN_GT:
+						op = is_smaller_function;
+						op(result, &op2, &op1);
+						break;
+					case ZEND_COMPARISON_CHAIN_GE:
+						op = is_smaller_or_equal_function;
+						op(result, &op2, &op1);
+						break;
+					EMPTY_SWITCH_DEFAULT_CASE();
+				}
+
+				if (UNEXPECTED(EG(exception))) {
+					zval_ptr_dtor_nogc(&op1);
+					zval_ptr_dtor_nogc(&op2);
+					ret = FAILURE;
+					break;
+				}
+
+				chain_result = zend_is_true(result);
+				zval_ptr_dtor_nogc(&op1);
+				if (!chain_result) {
+					zval_ptr_dtor_nogc(&op2);
+					ZVAL_FALSE(result);
+					ret = SUCCESS;
+					break;
+				}
+
+				ZVAL_COPY_VALUE(&op1, &op2);
+			}
+
+			if (ret == SUCCESS && chain_result) {
+				ZVAL_TRUE(result);
+				zval_ptr_dtor_nogc(&op1);
+			}
+			break;
+		}
 		case ZEND_AST_UNARY_OP:
 			if (UNEXPECTED(zend_ast_evaluate_ex(&op1, ast->child[0], scope, &short_circuited, ctx) != SUCCESS)) {
 				ret = FAILURE;
@@ -2633,6 +2701,34 @@ simple_list:
 				EMPTY_SWITCH_DEFAULT_CASE();
 			}
 			break;
+		case ZEND_AST_COMPARISON_CHAIN:
+		{
+			zend_ast_list *list = zend_ast_get_list(ast);
+			uint32_t i;
+
+			ZEND_ASSERT(list->children >= 3 && (list->children & 1) == 1);
+			zend_ast_export_ex(str, list->child[0], 180, indent);
+			for (i = 1; i < list->children; i += 2) {
+				uint32_t relation = zval_get_long(zend_ast_get_zval(list->child[i]));
+				switch (relation) {
+					case ZEND_COMPARISON_CHAIN_LT:
+						smart_str_appends(str, " < ");
+						break;
+					case ZEND_COMPARISON_CHAIN_LE:
+						smart_str_appends(str, " <= ");
+						break;
+					case ZEND_COMPARISON_CHAIN_GT:
+						smart_str_appends(str, " > ");
+						break;
+					case ZEND_COMPARISON_CHAIN_GE:
+						smart_str_appends(str, " >= ");
+						break;
+					EMPTY_SWITCH_DEFAULT_CASE();
+				}
+				zend_ast_export_ex(str, list->child[i + 1], 181, indent);
+			}
+			break;
+		}
 		case ZEND_AST_GREATER:                 BINARY_OP(" > ",   180, 181, 181);
 		case ZEND_AST_GREATER_EQUAL:           BINARY_OP(" >= ",  180, 181, 181);
 		case ZEND_AST_AND:                     BINARY_OP(" && ",  130, 130, 131);

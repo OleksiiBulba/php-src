@@ -70,6 +70,7 @@ enum _zend_ast_kind {
 	ZEND_AST_ATTRIBUTE_GROUP,
 	ZEND_AST_MATCH_ARM_LIST,
 	ZEND_AST_MODIFIER_LIST,
+	ZEND_AST_COMPARISON_CHAIN,
 
 	/* 0 child nodes */
 	ZEND_AST_MAGIC_CONST = 0 << ZEND_AST_NUM_CHILDREN_SHIFT,
@@ -185,6 +186,11 @@ enum _zend_ast_kind {
 
 typedef uint16_t zend_ast_kind;
 typedef uint16_t zend_ast_attr;
+
+#define ZEND_COMPARISON_CHAIN_LT 1
+#define ZEND_COMPARISON_CHAIN_LE 2
+#define ZEND_COMPARISON_CHAIN_GT 3
+#define ZEND_COMPARISON_CHAIN_GE 4
 
 struct _zend_ast {
 	zend_ast_kind kind; /* Type of the node (ZEND_AST_* enum constant) */

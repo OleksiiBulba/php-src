@@ -36,6 +36,49 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 #define YYMALLOC malloc
 #define YYFREE free
 #endif
+
+static zend_ast *zend_ast_create_comparison_chain_node(zend_ast *left, uint32_t relation, zend_ast *right)
+{
+	zend_ast *chain;
+
+	if (left->kind == ZEND_AST_COMPARISON_CHAIN) {
+		chain = zend_ast_list_add(left, zend_ast_create_zval_from_long(relation));
+		return zend_ast_list_add(chain, right);
+	}
+
+	if (left->kind == ZEND_AST_BINARY_OP
+			&& (left->attr == ZEND_IS_SMALLER || left->attr == ZEND_IS_SMALLER_OR_EQUAL)) {
+		uint32_t left_relation = left->attr == ZEND_IS_SMALLER
+			? ZEND_COMPARISON_CHAIN_LT
+			: ZEND_COMPARISON_CHAIN_LE;
+
+		chain = zend_ast_create_list(2, ZEND_AST_COMPARISON_CHAIN,
+			left->child[0], zend_ast_create_zval_from_long(left_relation));
+		chain = zend_ast_list_add(chain, left->child[1]);
+		left->child[0] = NULL;
+		left->child[1] = NULL;
+		zend_ast_destroy(left);
+		chain = zend_ast_list_add(chain, zend_ast_create_zval_from_long(relation));
+		return zend_ast_list_add(chain, right);
+	}
+
+	if (left->kind == ZEND_AST_GREATER || left->kind == ZEND_AST_GREATER_EQUAL) {
+		uint32_t left_relation = left->kind == ZEND_AST_GREATER
+			? ZEND_COMPARISON_CHAIN_GT
+			: ZEND_COMPARISON_CHAIN_GE;
+
+		chain = zend_ast_create_list(2, ZEND_AST_COMPARISON_CHAIN,
+			left->child[0], zend_ast_create_zval_from_long(left_relation));
+		chain = zend_ast_list_add(chain, left->child[1]);
+		left->child[0] = NULL;
+		left->child[1] = NULL;
+		zend_ast_destroy(left);
+		chain = zend_ast_list_add(chain, zend_ast_create_zval_from_long(relation));
+		return zend_ast_list_add(chain, right);
+	}
+
+	return NULL;
+}
 }
 
 %code requires {
@@ -70,7 +113,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %left '^'
 %left T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG
 %nonassoc T_IS_EQUAL T_IS_NOT_EQUAL T_IS_IDENTICAL T_IS_NOT_IDENTICAL T_SPACESHIP
-%nonassoc '<' T_IS_SMALLER_OR_EQUAL '>' T_IS_GREATER_OR_EQUAL
+%left '<' T_IS_SMALLER_OR_EQUAL '>' T_IS_GREATER_OR_EQUAL
 %left T_PIPE
 %left '.'
 %left T_SL T_SR
@@ -1339,13 +1382,33 @@ expr:
 	|	expr T_PIPE expr
 			{ $$ = zend_ast_create(ZEND_AST_PIPE, $1, $3); }
 	|	expr '<' expr
-			{ $$ = zend_ast_create_binary_op(ZEND_IS_SMALLER, $1, $3); }
+			{
+				$$ = zend_ast_create_comparison_chain_node($1, ZEND_COMPARISON_CHAIN_LT, $3);
+				if ($$ == NULL) {
+					$$ = zend_ast_create_binary_op(ZEND_IS_SMALLER, $1, $3);
+				}
+			}
 	|	expr T_IS_SMALLER_OR_EQUAL expr
-			{ $$ = zend_ast_create_binary_op(ZEND_IS_SMALLER_OR_EQUAL, $1, $3); }
+			{
+				$$ = zend_ast_create_comparison_chain_node($1, ZEND_COMPARISON_CHAIN_LE, $3);
+				if ($$ == NULL) {
+					$$ = zend_ast_create_binary_op(ZEND_IS_SMALLER_OR_EQUAL, $1, $3);
+				}
+			}
 	|	expr '>' expr
-			{ $$ = zend_ast_create(ZEND_AST_GREATER, $1, $3); }
+			{
+				$$ = zend_ast_create_comparison_chain_node($1, ZEND_COMPARISON_CHAIN_GT, $3);
+				if ($$ == NULL) {
+					$$ = zend_ast_create(ZEND_AST_GREATER, $1, $3);
+				}
+			}
 	|	expr T_IS_GREATER_OR_EQUAL expr
-			{ $$ = zend_ast_create(ZEND_AST_GREATER_EQUAL, $1, $3); }
+			{
+				$$ = zend_ast_create_comparison_chain_node($1, ZEND_COMPARISON_CHAIN_GE, $3);
+				if ($$ == NULL) {
+					$$ = zend_ast_create(ZEND_AST_GREATER_EQUAL, $1, $3);
+				}
+			}
 	|	expr T_SPACESHIP expr
 			{ $$ = zend_ast_create_binary_op(ZEND_SPACESHIP, $1, $3); }
 	|	expr T_INSTANCEOF class_name_reference
